@@ -1,10 +1,11 @@
 bin/auto_install_databases.pl
 bin/bed2gff3.pl
 bin/bp_load_gff.pl
-bin/gbrowse_attach_slaves.pl
 bin/gbrowse_change_passwd.pl
 bin/gbrowse_clean.pl
 bin/gbrowse_create_account.pl
+bin/gbrowse_grow_cloud_vol.pl
+bin/gbrowse_import_ucsc_db.pl
 bin/gbrowse_metadb_config.pl
 bin/gbrowse_netinstall.pl
 bin/gbrowse_netinstall2.pl
@@ -185,6 +186,7 @@ docs/README.tutorial
 etc/default/gbrowse-slave
 etc/init.d/gbrowse-slave
 htdocs/annotation_help.html
+htdocs/cloud_index.html
 htdocs/css/dropdown/default_theme.css
 htdocs/css/dropdown/dropdown.css
 htdocs/css/dropdown/helper.css
@@ -535,6 +537,7 @@ htdocs/tutorial/figures/wiggle_density.png
 htdocs/tutorial/tutorial.css
 htdocs/tutorial/tutorial.html
 htdocs/tutorial/tutorial.phyTreeEdit.html
+htdocs/vbox_index.html
 INSTALL
 install_util/cgi_install.pl
 install_util/conf_install.pl
@@ -670,3 +673,5 @@ t/testdata/phylo_align/species.tre
 t/testdata/phylo_align/volvox_alignment.conf
 t/testdata/phylo_align/volvox_phyloalign.gff
 t/testdata/TemplateCopy.pm
+META.yml
+META.json

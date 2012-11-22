@@ -21,6 +21,7 @@ use constant TRUE  => 1;
 use constant DEBUG => 0;
 use constant DEBUGGING_RECTANGLES => 0;  # outline the imagemap
 use constant BENCHMARK => 0;
+use constant SLAVE_RETRIES => 2;
 
 use constant DEFAULT_EMPTYTRACKS => 0;
 use constant PAD_DETAIL_SIDES    => 10;
@@ -28,6 +29,7 @@ use constant RULER_INTERVALS     => 20;
 use constant PAD_OVERVIEW_BOTTOM => 5;
 use constant TRY_CACHING_CONFIG  => 1;
 use constant MAX_PROCESSES       => 4;
+use constant MAX_TITLE_LEN       => 50;
 
 # when we load, we set a global indicating the LWP::UserAgent is available
 my $LPU_AVAILABLE;
@@ -628,8 +630,11 @@ sub wrap_rendered_track {
 			  div({-class => 'linkbg', -style => 'position:relative; left:30px;',},$about_ipad)),
  		  );
     
+    my $clipped_title = $title;
+    $clipped_title    = substr($clipped_title,0,MAX_TITLE_LEN-3).'...' if length($clipped_title) > MAX_TITLE_LEN;
+
     # modify the title if it is a track with subtracks
-    $self->select_features_menu($label,\$title);
+    $self->select_features_menu($label,\$clipped_title);
     
     my $titlebar = 
 	span(
@@ -639,7 +644,7 @@ sub wrap_rendered_track {
 
  	    $self->if_not_ipad(@images,),
 	    $self->if_ipad(span({-class => 'menuclick',  -onClick=> "GBox.showTooltip(event,'load:popmenu_${title}')"}, $menuicon,),),	
-	    span({-class => 'drag_region',},$title),
+	    span({-class => 'drag_region',},$clipped_title),
 
 	);
 
@@ -827,9 +832,10 @@ sub run_remote_requests {
 	  $requests->{$_}->lock();   # flag that request is in process
       }
   
+      my $tries = 0;
     FETCH: {
 	my $request = POST ($url,
-			    Content_Type => 'multipart/form-data',
+			    Content_Type => 'form-data',
 			    Content => [
 				operation  => 'render_tracks',
 				panel_args => $s_args,
@@ -881,7 +887,7 @@ sub run_remote_requests {
 	    if ($alternate_url) {
 		warn "retrying fetch of @labels with $alternate_url";
 		$url = $alternate_url;
-		redo FETCH;
+		redo FETCH if $tries++ < SLAVE_RETRIES;
 	    }
 
 	    $response_line =~ s/^\d+//;  # get rid of status code
@@ -1557,6 +1563,7 @@ sub run_local_requests {
 
 		$titles    = $panel->key_boxes;
 		foreach (@$titles) {
+		    $_->[0]   = substr($_->[0],0,MAX_TITLE_LEN-3).'...' if length($_->[0])>MAX_TITLE_LEN;
 		    my $index = $_->[5]->bgcolor;  # record track config bgcolor
 		    my ($r,$g,$b) = $gd->rgb($index);
 		    my $alpha     = 1;
