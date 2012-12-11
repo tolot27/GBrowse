@@ -155,7 +155,7 @@ sub request_panels {
   if ($args->{deferred}) {
 
       # precache local databases into cache
-      my $length = $self->segment->length;
+      my $length = $self->segment_length;
       my $source = $self->source;
       for my $l (@$local_labels) {
 	  my $db = eval { $source->open_database($l,$length)};
@@ -1193,7 +1193,7 @@ sub make_map {
 
   my $source = $self->source;
 
-  my $length   = $self->segment->length;
+  my $length   = $self->segment_length;
   my $settings = $self->settings;
   my $flip     = $panel->flip;
   my ($track_dbid) = $source->db_settings($label,$length);
@@ -1261,8 +1261,8 @@ sub make_imagemap_element_inline {
     my $summary                 = $options->{summary};
 
     if ($summary) {
-	return {onmouseover => $self->render->feature_summary_message('mouseover',$label),
-		onmouseeown => $self->render->feature_summary_message('mousedown',$label),
+	return {onmouseover => $self->feature_summary_message('mouseover',$label),
+		onmouseeown => $self->feature_summary_message('mousedown',$label),
 		href        => 'javascript:void(0)',
 		inline      => 1
 	}
@@ -1321,6 +1321,16 @@ sub make_imagemap_element_inline {
                       );
 
     return \%attributes;
+}
+
+# BUG: This is cut-and-paste from Render.pm due to encapsulation failure.
+# (no render object available to slave, so slave is broken)
+sub feature_summary_message {
+    my $self = shift;
+    my ($event_type,$label) = @_;
+    my $sticky = $event_type eq 'mousedown' || 0;
+    my $message= $self->source->setting($label=>'key'). ' '.lc($self->language->translate('FEATURE_SUMMARY'));
+    return "GBubble.showTooltip(event,'$message',$sticky)";
 }
 
 # this creates image map for rulers and scales, where clicking on the scale
@@ -1418,7 +1428,7 @@ sub run_local_requests {
 
     my $settings       = $self->settings;
     my $segment        = $self->segment;
-    my $length         = $segment->length;
+    my $length         = $self->segment_length;
 
     my $source         = $self->source;
     my $lang           = $self->language;
@@ -1695,7 +1705,7 @@ sub add_features_to_track {
   my $max_labels      = $self->label_density;
   my $max_bump        = $self->bump_density;
 
-  my $length  = $segment->length;
+  my $length  = $self->segment_length;
   my $source  = $self->source;
 
   # sort tracks by the database they come from
@@ -2121,7 +2131,7 @@ sub override_settings {
     my $label = shift;
     my $source            = $self->source;
     my $state             = $self->settings;
-    my $length            = eval {$self->segment->length} || 0;
+    my $length            = eval {$self->segment_length} || 0;
     my $is_summary        = $source->show_summary($label,$length,$state);
     my $semantic_override = Bio::Graphics::Browser2::Render->find_override_region(
 	$state->{features}{$label}{semantic_override},
@@ -2145,7 +2155,8 @@ sub create_track_args {
   my ($label,$args) = @_;
 
   my $segment         = $self->segment;
-  my $length          = $segment->length;
+  my $length          = $self->segment_length($label);
+
   my $source          = $self->source;
   my $lang            = $self->language;
 
@@ -2228,19 +2239,12 @@ sub create_track_args {
   return @args;
 }
 
-sub vis_length {
-    my $self = shift;
-    my $segment = $self->segment;
-    my $length  = $segment->length;
-    return $length/$self->details_mult;
-}
-
 sub subtrack_manager {
     my $self = shift;
     my $label = shift;
     return $self->{_stt}{$label} if exists $self->{_stt}{$label};
     return $self->{_stt}{$label} = undef
-	if $self->source->show_summary($label,$self->vis_length,$self->settings);
+	if $self->source->show_summary($label,$self->segment_length,$self->settings);
     return $self->{_stt}{$label} = Bio::Graphics::Browser2::Render->create_subtrack_manager($label,
 											    $self->source,
 											    $self->settings);
@@ -2342,7 +2346,7 @@ sub do_label {
 
   my $source              = $self->source;
 
-  my $maxl              = $source->code_setting($track_name => 'label density');
+  my $maxl              = $source->semantic_setting($track_name => 'label density', $length);
   $maxl                 = $max_labels unless defined $maxl;
   my $maxed_out         = $count <= $maxl;
 
@@ -2469,7 +2473,7 @@ sub make_title {
   local $^W = 0;  # tired of uninitialized variable warnings
   my $source = $self->source;
 
-  my $length = eval {$self->segment->length} || 0;
+  my $length = eval {$self->segment_length} || 0;
 
   my ($title,$key) = ('','');
 
@@ -2524,20 +2528,17 @@ sub make_title {
     }
   };
   warn $@ if $@;
-
   return $title;
 }
 
 sub segment_length {
-    my $self    = shift;
-    my $label   = shift;
-    my $section = $label 
-	           ? Bio::Graphics::Browser2::DataSource->get_section_from_label($label) 
-		   : 'detail';
-    return eval {$section eq 'detail'   ? $self->segment->length
-	        :$section eq 'region'   ? $self->region_segment->length
-		:$section eq 'overview' ? $self->whole_segment->length
-		: 0} || 0;
+    my $self  = shift;
+    my $label = shift;
+    return Bio::Graphics::Browser2::Render->_segment_length($label,
+							    $self->segment,
+							    $self->region_segment,
+							    $self->whole_segment,
+							    $self->details_mult);
 }
 
 sub make_link_target {

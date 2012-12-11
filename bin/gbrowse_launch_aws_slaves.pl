@@ -14,32 +14,51 @@
 # GBrowseSlave
 #   allow inbound on 8101-8105 from GBrowseMaster group
 #   (nothing else)
+#
+# Master server must be configured to allow http://localhost/server-status requests
+# from localhost. The "Satisfy any" step ensures that no password will
+# be required on this URL.
+#
+#<Location /server-status>
+#    SetHandler server-status
+#    Order deny,allow
+#    Deny from all
+#    Allow from 127.0.0.1
+#    Satisfy any
+#</Location>
+# ExtendedStatus On
+#
+
 
 use strict;
+use Getopt::Long;
+use Parse::Apache::ServerStatus;
+use FindBin '$Bin';
 use VM::EC2;
 use VM::EC2::Instance::Metadata;
-use Getopt::Long;
+use Parse::Apache::ServerStatus;
 
 $SIG{TERM} = sub {exit 0};
 $SIG{INT}  = sub {exit 0};
-END {          terminate_instances()  }
+END {  terminate_instances()  }
 
 # load averages:
-# each item represents 15 min load average, lower and upper bound on instances
+# each item represents requests per second, lower and upper bounds
 use constant LOAD_TABLE => [
     #load  min  max
-    [ 0.5,  0,   1 ],
-    [ 1.0,  0,   2 ],
-    [ 2.0,  1,   4 ],
-    [ 3.0,  3,   6 ],
-    [10.0,  6,   8 ]
+    [ 0.01,  0,   1 ],
+    [ 0.5,   0,   2 ],
+    [ 1.0,   1,   4 ],
+    [ 5.0,   3,   6 ],
+    [ 10.0,  6,   8 ]
     ];
 
-use constant IMAGE_TYPE     => 'm1.small';
-use constant POLL_INTERVAL  => 0.5;  # minutes
-use constant SPOT_PRICE     => 0.05;  # dollars/hour
-use constant SECURITY_GROUP => 'GBrowseSlave';
-use constant CONFIGURE_SLAVES => '/opt/gbrowse/bin/gbrowse_configure_slaves.pl';
+use constant IMAGE_TYPE       => 'm1.large';
+use constant POLL_INTERVAL    => 0.5;  # minutes
+use constant SPOT_PRICE       => 0.08;  # dollars/hour
+use constant SECURITY_GROUP   => 'GBrowseSlave';
+use constant CONFIGURE_SLAVES => "$Bin/gbrowse_configure_slaves.pl";
+use constant SERVER_STATUS    => 'http://localhost/server-status';
 
 my($Access_key,$Secret_key);
 GetOptions(
@@ -55,13 +74,29 @@ my $meta       = VM::EC2::Instance::Metadata->new();
 my $imageId    = $meta->imageId;
 my $instanceId = $meta->instanceId;
 my $zone       = $meta->availabilityZone;
+my $subnet     = eval {(values %{$meta->interfaces})[0]{subnetId}};
+my $vpcId      = eval {(values %{$meta->interfaces})[0]{vpcId}};
 my @groups     = $meta->securityGroups;
 
-warn "slave imageId=$imageId, zone=$zone\n";
+die "This instance needs to belong to the GBrowseMaster security group in order for this script to run correctly"
+    unless "@groups" =~ /GBrowseMaster/;
 
-(my $region = $zone) =~ s/[a-z]$//;  #  zone=>region
+warn "slave imageId=$imageId, zone=$zone, subnet=$subnet, vpcId=$vpcId\n";
 
+(my $region = $zone)       =~ s/[a-z]$//;  #  zone=>region
 my $ec2     = VM::EC2->new(-region=>$region);
+
+my (@slave_security_groups) = $ec2->describe_security_groups({'group-name' => SECURITY_GROUP});
+my $slave_security_group;
+if ($vpcId) {
+    ($slave_security_group)  = grep {$vpcId eq $_->vpcId} @slave_security_groups; 
+} else {
+    $slave_security_group = $slave_security_groups[0];
+}
+
+$slave_security_group or die "Could not find a security group named ",SECURITY_GROUP," in current region or VPC";
+
+my $pr      = Parse::Apache::ServerStatus->new(url=>SERVER_STATUS);
 
 while (1) { # main loop
     my $load = get_load();
@@ -81,15 +116,8 @@ sub get_load {
 	chomp (my $load = <$fh>);
 	return $load;
     }
-    elsif (-e '/proc/loadavg') {
-	open my $fh,'/proc/loadavg';
-	my ($one,$five,$fifteen) = split /\s+/,<$fh>;
-	return $five;
-    } else {
-	my $l = `w`;
-	my ($one,$five,$fifteen) = $l =~ /load average: ([0-9.]+), ([0-9.]+), ([0-9.]+)/;
-	return $five;
-    }
+    my $stats = $pr->get or die $pr->errstr;
+    return $stats->{rs};
 }
 
 sub adjust_spot_requests {
@@ -110,12 +138,12 @@ sub adjust_spot_requests {
 
     # count the realized and pending 
     my @spot_requests = $ec2->describe_spot_instance_requests({'tag:Requestor' => 'gbrowse_launch_aws_slaves'});
-    warn "spot_requests = @spot_requests";
     my @potential_instances;
     for my $sr (@spot_requests) {
 	my $state    = $sr->state;
 	my $instance = $sr->instance;
 	if ($state eq 'open' or ($instance && $instance->instanceState =~ /running|pending/)) {
+	    $instance->add_tag(Name => 'GBrowse Slave')      if $instance;
 	    $instance->add_tag(GBrowseMaster => $instanceId) if $instance;  # we'll use this to terminate all slaves sometime later
 	    push @potential_instances,$instance || $sr;
 	}
@@ -140,13 +168,15 @@ sub adjust_spot_requests {
     if (@potential_instances < $min_instances) {
 	warn "launching a new spot request";
 	my @requests = $ec2->request_spot_instances(
-	    -image_id          => $imageId,
-	    -instance_type     => IMAGE_TYPE,
-	    -instance_count    => 1,
-	    -security_group    => SECURITY_GROUP,
-	    -spot_price        => SPOT_PRICE,
+	    -image_id             => $imageId,
+	    -instance_type        => IMAGE_TYPE,
+	    -instance_count       => 1,
+	    -security_group_id    => $slave_security_group,
+	    -spot_price           => SPOT_PRICE,
+	    $subnet? (-subnet_id  => $subnet) : (),
 	    -user_data         => "#!/bin/sh\nexec /opt/gbrowse/etc/init.d/gbrowse-slave start",
 	    );
+	@requests or warn $ec2->error_str;
 	$_->add_tag(Requestor=>'gbrowse_launch_aws_slaves') foreach @requests;
 	push @potential_instances,@requests;
     }
@@ -160,7 +190,7 @@ sub adjust_configuration {
 
     my @instances = grep {$_->isa('VM::EC2::Instance')} @potential_instances;
     if (@instances) {
-	my @addresses = grep {$_} map  {$_->privateDnsName}    @instances;
+	my @addresses = grep {$_} map  {$_->privateDnsName||$_->privateIpAddress}    @instances;
 	return unless @addresses;
 	warn "Adding slaves at address @addresses";
 	my @a         = map {("http://$_:8101",
@@ -177,15 +207,15 @@ sub terminate_instances {
     $ec2 or return;
     warn "terminating all slave instances";
     my @spot_requests = $ec2->describe_spot_instance_requests({'tag:Requestor' => 'gbrowse_launch_aws_slaves'});
-    warn "spot requests = @spot_requests";
     my @instances     = $ec2->describe_instances({'tag:GBrowseMaster'=>$instanceId});
-    warn "instances = @instances";
     my %to_terminate = map {$_=>1} @instances;
     foreach (@spot_requests) {
 	$to_terminate{$_->instance}++;
 	$ec2->cancel_spot_instance_requests($_);
     }
-    $ec2->terminate_instances(keys %to_terminate);
+    my @i = grep {/^i-/} keys %to_terminate;
+    warn "instances to terminate = @i";
+    $ec2->terminate_instances(@i);
     system 'sudo',CONFIGURE_SLAVES,'--set','';
 }
 
