@@ -271,7 +271,6 @@ sub make_requests {
     foreach my $label ( @{ $labels || [] } ) {
 
         my @track_args = $self->create_track_args( $label, $args );
-
 	my (@filter_args,@featurefile_args,@subtrack_args);
 
 	my $format_option = $settings->{features}{$label}{options};
@@ -791,13 +790,11 @@ sub run_remote_requests {
   }
 
   # sort requests by their renderers
-  my $slave_status = Bio::Graphics::Browser2::Render::Slave::Status->new(
-      $source->globals->slave_status_path
-      );
+  my $slave_status = $self->slave_status;
 
   my %renderers;
   for my $label (@labels_to_generate) {
-      my $url     = $source->remote_renderer or next;
+      my $url     = $source->remote_renderer($label) or next;
       my @urls    = shellwords($url);
       $url        = $slave_status->select(@urls);
       warn "label => $url (selected)" if DEBUG;
@@ -819,13 +816,14 @@ sub run_remote_requests {
 
   for my $url (keys %renderers) {
 
-      my $child   = $render->fork();
+      my $child   = Bio::Graphics::Browser2::Render->fork();
       next if $child;
 
       my $total_time = time();
 
       # THIS PART IS IN THE CHILD
       my @labels   = keys %{$renderers{$url}};
+      warn "REMOTE FETCH ON @labels" if DEBUG;
       my $s_track  = Storable::nfreeze(\@labels);
 
       foreach (@labels) {
@@ -885,7 +883,7 @@ sub run_remote_requests {
 			    } @labels;
 	    my $alternate_url = $slave_status->select(keys %urls);
 	    if ($alternate_url) {
-		warn "retrying fetch of @labels with $alternate_url";
+		warn "[$$] retrying fetch of @labels with $alternate_url";
 		$url = $alternate_url;
 		redo FETCH if $tries++ < SLAVE_RETRIES;
 	    }
@@ -900,6 +898,15 @@ sub run_remote_requests {
 
       CORE::exit(0);  # from CHILD
   }
+}
+
+sub slave_status {
+    my $self = shift;
+    my $source = $self->source;
+    return $self->{slave_status} ||=
+	Bio::Graphics::Browser2::Render::Slave::Status->new(
+	    $source->globals->slave_status_path
+	);
 }
 
 # Sort requests into those to be performed locally
@@ -927,6 +934,8 @@ sub sort_local_remote {
     unless ($use_renderfarm) {
 	return (\@uncached,[]);
     }
+    
+    my $slave_status = $self->slave_status;
 
     my $url;
     my %is_remote = map { $_ => ( 
@@ -935,9 +944,10 @@ sub sort_local_remote {
 			      !/^(ftp|http|das):/ &&
 			      !$source->is_usertrack($_) &&
 			      !$source->is_remotetrack($_) &&
-			      (($url = $source->remote_renderer||0) &&
+			      (($url = $source->remote_renderer($_)||0) &&
 			      ($url ne 'none') &&
-			      ($url ne 'local')))
+			      ($url ne 'local') &&
+			      $slave_status->select(shellwords($url))))
                         } @uncached;
 
     my @remote    = grep {$is_remote{$_} } @uncached;
@@ -2073,13 +2083,12 @@ sub create_panel_args {
 	      -postgrid     => $postgrid,
 	      -background   => $args->{background} || '',
 	      -truecolor    => $source->global_setting('truecolor') || 0,
-	      -map_fonts_to_truetype    => $source->global_setting('truetype') || 0,
+              -truetype     => $source->global_setting('truetype') || 0,
 	      -extend_grid  => 1,
               -gridcolor    => $source->global_setting('grid color') || 'lightcyan',
               -gridmajorcolor    => $source->global_setting('grid major color') || 'cyan',
 	      @pass_thru_args,   # position is important here to allow user to override settings
 	     );
-
   push @argv, -flip => 1 if $flip;
   my $p  = $self->image_padding;
   my $pl = $source->global_setting('pad_left');
@@ -2582,6 +2591,7 @@ sub balloon_tip_setting {
   } else {
     $val = $source->link_pattern($value,$feature,$panel);
   }
+  $val ||= '';
 
   if ($val=~ /^\s*\[([\w\s]+)\]\s+(.+)/s) {
     $balloon_type = $1;
